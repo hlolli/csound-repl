@@ -1,0 +1,12 @@
+out
+target
+node_modules
+package-lock.json
+*#
+*~
+*.wav
+yarn.lock
+lib/cljs-runtime
+.nrepl-port
+.shadow-cljs
+flute.orc
