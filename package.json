@@ -26,6 +26,7 @@
     "argparse": "^1.0.10",
     "csound-api": "^0.10.7",
     "terminal-kit": "^1.26.2",
+    "terminal-kit-plugins": "git+https://github.com/dave-newson/terminal-kit-plugins.git"
   },
   "devDependencies": {
     "shadow-cljs": "^2.6.7"

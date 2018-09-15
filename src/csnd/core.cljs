@@ -1,9 +1,9 @@
 (ns csnd.core
   (:require [csnd.colors :as colors]
+            [csnd.term :refer [term]]
             ["csound-api" :as csound]
             ["cluster" :as cluster]
             ["argparse" :as args]
-            ["terminal-kit" :as terminal]
             ["path" :refer [basename] :as path]
             ["fs" :as fs]
             [clojure.string :as string]
@@ -12,12 +12,11 @@
 
 ;; csound.DisposeOpcodeList(Csound, opcodeList);
 
-(def state (atom {:isCharacter false
-                  :currentLine ""}))
+(def state (atom {:isCharacter          false
+                  :currentLine          ""
+                  :current-input-stream nil}))
 
 (def csound-instance (atom nil))
-
-(def current-colorset (atom colors/cyberpunk-neon))
 
 (.SetDefaultMessageCallback csound (fn []))
 
@@ -36,105 +35,137 @@
                             (aget 2)))]
       (remove empty? (js->clj sym-arr)))))
 
-
-(defn start-csound [filepath config term]
-  (let [instance (.Create csound "-m0")
-        _        (.SetDefaultMessageCallback
-                  csound (fn [code msg]
-                           (.previousLine term 1)
-                           (if (= 0 code)
-                             ((.colorRgbHex term
-                                            (:color1 @current-colorset))
-                              (str "\n MSG: " msg "\n"))
-                             ((.colorRgbHex
-                               term
-                               "#FF0000")
-                              msg))
-                           ;;(js/console.log msg)
-                           ;; (.scrollUp term 1)
-                           ))]
-    (.SetOption csound instance "--output=dac")
-    ;; (.SetOption csound instance "--output=dac")
-    (.Message csound instance "HELLO WORLD!")
-    (reset! csound-instance instance)))
-
-(def term (.-terminal terminal))
-
 (defn prompt [filename]
   (if filename
     (str ((.colorRgbHex
            (.bold term)
-           (:color3 @current-colorset))
+           (:color3 @colors/current-colorset))
           (str "[" filename "] "))
          ((.colorRgbHex
            (.bold term)
-           (:color2 @current-colorset))
-          "csnd> "))
+           (:color2 @colors/current-colorset))
+          "csnd> ")
+         (.styleReset term))
     ((.colorRgbHex
       (.bold term)
-      (:color2 @current-colorset))
+      (:color2 @colors/current-colorset))
      ;;"🎵> "
      "csnd> "
      )))
 
-(defn error-color [string]
-  ((.colorRgbHex
-    (.bold term)
-    "#FF0000")
-   string))
+(def logger-buffer (atom []))
+
+(defn logger [prompt-filename msg error?]
+  (let [cursor-offset
+        (if-let [input-stream (:current-input-stream @state)]
+          (.getCursorPosition input-stream) 0)
+        input-field-location
+        (if-let [input-stream (:current-input-stream @state)]
+          (.getPosition input-stream) 0)]
+    (when-let [input-stream (:current-input-stream @state)]
+      (.hide input-stream)
+      (.pause input-stream)
+      (.scrollUp term 1)
+      (.previousLine term 1)
+      (.eraseLine term))
+    (if error?
+      (colors/csound-log-color-error msg)
+      (colors/csound-log-color msg))
+    (when-let [input-stream (:current-input-stream @state)]
+      (.rebase input-stream
+               0
+               (inc (.-y input-field-location)))
+      (.eraseLine term)
+      (.column term 0)
+      (prompt prompt-filename)
+      (.rebase  input-stream
+                (.-x input-field-location)
+                (.-y input-field-location))
+      (.resume input-stream)
+      (.show input-stream)
+      ;; (.redraw input-stream)
+      ))
+  ;;(js/console.log msg)
+  ;; (.scrollUp term 1)
+  )
+
+
+
+(defn start-csound [filepath config]
+  (let [Csound        (.Create csound "-m0")
+        filename      (path/basename filepath)
+        _             (.SetDefaultMessageCallback
+                       csound (fn [code msg]
+                                (if-not (:current-input-stream @state)
+                                  (swap! logger-buffer conj [msg (not= 0 code)])
+                                  (logger filename msg (not= 0 code)))))
+        file-contents (fs/readFileSync filepath)]
+    (.SetOption csound Csound "--output=dac")
+    (case (path/extname filepath)
+      ".orc" (.CompileOrc csound Csound file-contents)
+      (do (colors/error-color
+           (str (path/basename filepath)
+                " is not a valid csound file."))
+          (.processExit term 0)))
+    (js/setTimeout #(.Message csound Csound "HELLO!") 2000)
+    (js/setTimeout #(.Message csound Csound "HELLO!") 5000)
+    (reset! csound-instance Csound)))
+
 
 (defn input-field []
-  (.-promise
-   (.inputField term
-                #js {
-                     :autoComplete
-                     (fn [input-string]
-                       (cond
-                         (> 2 (count input-string)) ""
-                         :else
-                         (or (first
-                              (filter #(re-find (re-pattern input-string) %)
-                                      @opcode-symbols)) "")))
-                     :echo             true
-                     :cancelable       true
-                     :autoCompleteHint true
-                     :autoCompleteMenu true
-                     :keyBindings
-                     #js {"CTRL_C"    "cancel"
-                          "ESCAPE"    "cancel"
-                          "TAB"       "autoComplete"
-                          ;; "SHIFT_TAB" "cyclePrevious"
-                          "ENTER"     "submit"
-                          "KP_ENTER"  "submit"
-                          "BACKSPACE" "backDelete"
-                          "DELETE"    "delete"
-                          "CTRL_U"    "deleteAllBefore"
-                          "CTRL_K"    "deleteAllAfter"
-                          "LEFT"      "backward"
-                          "RIGHT"     "forward"
-                          "DOWN"      "historyNext"
-                          "UP"        "historyPrevious"
-                          "HOME"      "first"
-                          "END"       "last"
-                          "CTRL_X"    (fn [] (prn "TEST!"))}
-                     }
-                #_(fn [error input]
-                    (js/console.log "\nYour input is: " input "error is: " error)
-                    ;;(.redraw this)
-                    
-                    ;; (re-prompt)
-                    #_(.exit js/process 0)))))
+  (.inputField term
+               #js {
+                    :autoComplete
+                    (fn [input-string]
+                      (cond
+                        (> 2 (count input-string)) ""
+                        :else
+                        (or (first
+                             (filter #(re-find (re-pattern input-string) %)
+                                     @opcode-symbols)) "")))
+                    :echo             true
+                    :cancelable       true
+                    :autoCompleteHint true
+                    :autoCompleteMenu true
+                    :keyBindings
+                    #js {"CTRL_C"    "cancel"
+                         "ESCAPE"    "cancel"
+                         "TAB"       "autoComplete"
+                         ;; "SHIFT_TAB" "cyclePrevious"
+                         "ENTER"     "submit"
+                         "KP_ENTER"  "submit"
+                         "BACKSPACE" "backDelete"
+                         "DELETE"    "delete"
+                         "CTRL_U"    "deleteAllBefore"
+                         "CTRL_K"    "deleteAllAfter"
+                         "LEFT"      "backward"
+                         "RIGHT"     "forward"
+                         "DOWN"      "historyNext"
+                         "UP"        "historyPrevious"
+                         "HOME"      "first"
+                         "END"       "last"
+                         "CTRL_X"    (fn [] (prn "TEST!"))}
+                    }
+               #_(fn [error input]
+                   (js/console.log "\nYour input is: " input "error is: " error)
+                   ;;(.redraw this)
+                   
+                   ;; (re-prompt)
+                   #_(.exit js/process 0))))
 
-(defn set-global-keys [term]
+(defn set-global-keys []
   (.on term "key"
        (fn [name matches data]
          (case name
            ("ESCAPE" "CTRL_C")
            (do (.deleteLine term 1)
-               (when (empty? (:currentLine @state))
-                 (.processExit term 0)))
-           ;; ("ENTER" "KP_ENTER")
-           ;; (.scrollDown term 1)
+               (if-let [input-stream (:current-input-stream @state)]
+                 (when (empty? (.getInput input-stream))
+                   (.scrollDown term 1)
+                   (.processExit term 0))
+                 (when (empty? (:currentLine @state))
+                   (.scrollDown term 1)
+                   (.processExit term 0))))
            nil)
          (-> (.getCursorLocation term)
              (.then (fn [location]
@@ -189,22 +220,29 @@
                   (path/resolve
                    (.-file args)))]
     (when-not (fs/existsSync (.-file args))
-      (error-color
+      (colors/error-color
        (str "File " abs-path " doesn't exist!"))
       (.processExit term 1))
     ;; (js/console.log args)
     (.windowTitle term "Csound REPL")
-    (set-global-keys term)
+    (set-global-keys)
     (reset! opcode-symbols (get-opcode-symbols))
     (prompt filename)
-    (start-csound abs-path {} term)
+    (start-csound abs-path {})
     (file-watcher abs-path)
-    (go-loop [promise (input-field)]
+    (go-loop [input-stream (input-field)]
+      (swap! state assoc :current-input-stream input-stream)
+      (when-not (empty? @logger-buffer)
+        (run! (fn [[msg error?]]
+                (js/setTimeout #(logger filename msg error?) 10)) @logger-buffer)
+        (reset! logger-buffer []))
       (let [next-val (chan 1)]
         ;; (set-global-keys term)
-        (-> promise
+        (-> (.-promise input-stream)
             (.then (fn [input]
-                     (when input (js/console.log "\n"))
+                     (when input
+                       (js/console.log "\n")
+                       (.scrollDown term 1))
                      (go (>! next-val (or input ""))))))
         (let [input (<! next-val)]
           (prompt filename)
