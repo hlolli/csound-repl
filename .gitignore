@@ -10,3 +10,4 @@ lib/cljs-runtime
 .nrepl-port
 .shadow-cljs
 flute.orc
+lib
