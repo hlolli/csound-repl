@@ -1,12 +1,15 @@
 (ns csnd.core
   (:require [csnd.colors :as colors]
             [csnd.term :refer [term]]
+            ["../js/mkDir" :default mkDir]
             ["csound-api" :as csound]
             ["cluster" :as cluster]
             ["argparse" :as args]
             ["path" :refer [basename] :as path]
             ["fs" :as fs]
+            ["os" :as os]
             [clojure.string :as string]
+            [clojure.tools.reader.edn :as edn]
             [cljs.core.async :refer [<! >! put! chan timeout] :as async])
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]))
 
@@ -21,6 +24,8 @@
 (.SetDefaultMessageCallback csound (fn []))
 
 (def opcode-symbols (atom []))
+
+(def history (atom []))
 
 (defn get-opcode-symbols []
   (let [js-arr #js []
@@ -54,41 +59,77 @@
      )))
 
 (def logger-buffer (atom []))
+(def first-log? (atom true))
 
 (defn logger [prompt-filename msg error?]
-  (let [cursor-offset
-        (if-let [input-stream (:current-input-stream @state)]
-          (.getCursorPosition input-stream) 0)
-        input-field-location
-        (if-let [input-stream (:current-input-stream @state)]
-          (.getPosition input-stream) 0)]
-    (when-let [input-stream (:current-input-stream @state)]
-      (.hide input-stream)
-      (.pause input-stream)
-      (.scrollUp term 1)
-      (.previousLine term 1)
-      (.eraseLine term))
-    (if error?
-      (colors/csound-log-color-error msg)
-      (colors/csound-log-color msg))
-    (when-let [input-stream (:current-input-stream @state)]
-      (.rebase input-stream
-               0
-               (inc (.-y input-field-location)))
-      (.eraseLine term)
-      (.column term 0)
-      (prompt prompt-filename)
-      (.rebase  input-stream
-                (.-x input-field-location)
-                (.-y input-field-location))
-      (.resume input-stream)
-      (.show input-stream)
-      ;; (.redraw input-stream)
-      ))
+  (cond
+    (empty? (string/trim msg)) nil
+    (= " <<<\n" msg)
+    (let [_       (swap! logger-buffer conj msg)
+          vek     (reverse @logger-buffer)
+          out-str (-> (apply str (interpose " " (reverse vek)))
+                      (string/replace "\n" " ")
+                      (string/replace ">>> " "")
+                      (string/replace " <<<" ""))
+          out-str (str "  <<<" out-str ">>>")]
+      (reset! logger-buffer [])
+      (logger prompt-filename out-str error?))
+    (or (not (empty? @logger-buffer))
+        (re-find #"line.*\n>>>" msg))
+    (swap! logger-buffer conj msg)
+    :else
+    (let [cursor-offset
+          (if-let [input-stream (:current-input-stream @state)]
+            (.getCursorPosition input-stream) 0)
+          input-field-location
+          (if-let [input-stream (:current-input-stream @state)]
+            (.getPosition input-stream) 0)
+          msg      (-> msg string/trim
+                       (string/replace "(token \"\n" "(token \"\\n"))
+          msg      (if (re-find #"<<<" msg)
+                     (string/replace msg "\n" "??")
+                     msg)
+          line-cnt (count (filter #(= % "\n") (seq msg)))]
+      (when-let [input-stream (:current-input-stream @state)]
+        (.hide input-stream)
+        (.pause input-stream)
+        (.scrollUp term 1)
+        (when @first-log? (.eraseLine term))
+        (.previousLine term 1)
+        (.eraseLine term))
+      (doall
+       (for [line (map #(str % "\n") (string/split msg "\n"))]
+         (if error?
+           (colors/csound-log-color-error line)
+           (colors/csound-log-color line))))
+      (when-let [input-stream (:current-input-stream @state)]
+        (.rebase input-stream
+                 0
+                 (+ line-cnt (inc (.-y input-field-location))))
+        ;; (when @first-log? (js/console.log "\n"))
+        (.eraseLine term)
+        (.column term 0)
+        (prompt prompt-filename)
+        (.rebase  input-stream
+                  (.-x input-field-location)
+                  (+ line-cnt (.-y input-field-location)))
+        (.resume input-stream)
+        (.show input-stream)
+        ;; (.redraw input-stream)
+        )
+      (when @first-log?
+        (reset! first-log? false))))
   ;;(js/console.log msg)
   ;; (.scrollUp term 1)
   )
 
+#_(defn logger [prompt-filename msg error?]
+    (let [terminal-width (.-width term)
+          chopped-msg    (string/split msg "\n")
+          #_             (map (partial apply str)
+                              (partition-all terminal-width msg))]
+      (run! #(logger* prompt-filename % error?)
+            chopped-msg)))
 
 
 (defn start-csound [filepath config]
@@ -103,12 +144,14 @@
     (.SetOption csound Csound "--output=dac")
     (case (path/extname filepath)
       ".orc" (.CompileOrc csound Csound file-contents)
-      (do (colors/error-color
-           (str (path/basename filepath)
-                " is not a valid csound file."))
+      (do (logger filename
+                  (str (path/basename filepath)
+                       " is not a valid csound file.")
+                  true)
           (.processExit term 0)))
-    (js/setTimeout #(.Message csound Csound "HELLO!") 2000)
-    (js/setTimeout #(.Message csound Csound "HELLO!") 5000)
+    (if (= (.-SUCCESS csound) (.Start csound Csound))
+      (.PerformAsync csound Csound #(.Destroy csound Csound))
+      (logger filename "Csound couldn't be started" true))
     (reset! csound-instance Csound)))
 
 
@@ -119,6 +162,8 @@
                     (fn [input-string]
                       (cond
                         (> 2 (count input-string)) ""
+                        (re-find #"[^a-zA-Z0-9]" input-string)
+                        ""
                         :else
                         (or (first
                              (filter #(re-find (re-pattern input-string) %)
@@ -127,6 +172,7 @@
                     :cancelable       true
                     :autoCompleteHint true
                     :autoCompleteMenu true
+                    :history          (clj->js @history)
                     :keyBindings
                     #js {"CTRL_C"    "cancel"
                          "ESCAPE"    "cancel"
@@ -208,17 +254,30 @@
                    :type "int"})
 
 (defn file-watcher [file]
-  (fs/watch file #js {:persistent false}
-            (fn [event-type filename]
-              (when (= "change" event-type)
-                ))))
+  (let [base-filename (path/basename file)]
+    (fs/watch file #js {:persistent false}
+              (fn [event-type filename]
+                (when (= "change" event-type)
+                  (logger base-filename
+                          (str "--> Changes detected in "
+                               base-filename
+                               " recompiling...")
+                          false))))))
 
 (defn main [& _args]
-  (let [args     (.parseArgs argument-parser)
-        filename (basename (.-file args))
-        abs-path (path/normalize
-                  (path/resolve
-                   (.-file args)))]
+  (let [args        (.parseArgs argument-parser)
+        filename    (basename (.-file args))
+        abs-path    (path/normalize
+                     (path/resolve
+                      (.-file args)))
+        cfg-dir     (path/join (os/homedir) ".csnd")
+        history-loc (path/join cfg-dir "history.edn")]
+    (mkDir cfg-dir)
+    (when (fs/existsSync history-loc)
+      (reset! history
+              (try (into [] (edn/read-string
+                             (.toString (fs/readFileSync history-loc))))
+                   (catch js/Error e []))))
     (when-not (fs/existsSync (.-file args))
       (colors/error-color
        (str "File " abs-path " doesn't exist!"))
@@ -241,6 +300,14 @@
         (-> (.-promise input-stream)
             (.then (fn [input]
                      (when input
+                       (when-not (empty? input)
+                         (let [new-history (vec (conj (take 49 @history) input))]
+                           (reset! history new-history)
+                           (fs/writeFileSync history-loc new-history))
+                         (when-let [Csound @csound-instance]
+                           (.ReadScore csound Csound input)
+                           ;; (.CompileOrc csound Csound input)
+                           ))
                        (js/console.log "\n")
                        (.scrollDown term 1))
                      (go (>! next-val (or input ""))))))

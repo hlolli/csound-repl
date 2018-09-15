@@ -1,5 +1,6 @@
 (ns csnd.colors
-  [:require [csnd.term :refer [term]]])
+  (:require [csnd.term :refer [term]]
+            ["../js/invertColor" :as invert-color]))
 
 (defn error-color [string]
   ((.colorRgbHex
@@ -18,10 +19,13 @@
   (atom cyberpunk-neon))
 
 (defn csound-log-color [string]
-  (str ((.colorRgbHex
-         (.dim term)
-         (:color2 @current-colorset))
-        string)
+  (str (.styleReset term)
+       (.defaultColor term string)
+       #_(.wrapColumn
+          ((.colorRgbHex
+            (.dim term)
+            "#FFFFFF")
+           string))
        (.styleReset term)))
 
 (defn csound-log-color-error [string]
