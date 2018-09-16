@@ -1,26 +1,22 @@
 (ns csnd.core
   (:require [csnd.colors :as colors]
-            [csnd.term :refer [term]]
-            [csnd.banner :refer [generate-banner]]
-            ["../js/mkDir" :default mkDir]
+            [csnd.term :refer [term prompt]]
+            [csnd.config :as config]
+            [csnd.logger :refer [logger logger-buffer]]
             ["csound-api" :as csound]
             ["cluster" :as cluster]
             ["argparse" :as args]
             ["path" :refer [basename] :as path]
             ["fs" :as fs]
-            ["os" :as os]
             [clojure.string :as string]
-            [clojure.tools.reader.edn :as edn]
             [cljs.core.async :refer [<! >! put! chan timeout] :as async])
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]))
 
 ;; csound.DisposeOpcodeList(Csound, opcodeList);
 
-(def state (atom {:isCharacter          false
-                  :currentLine          ""
-                  :current-input-stream nil
-                  :x                    0
-                  :y                    0}))
+(def state (atom {:current-input-stream nil
+                  :filename             ""
+                  :colorset             {}}))
 
 (def csound-instance (atom nil))
 
@@ -28,7 +24,7 @@
 
 (def opcode-symbols (atom []))
 
-(def history (atom []))
+(def history-atom (atom []))
 
 (defn get-opcode-symbols []
   (let [js-arr #js []
@@ -43,94 +39,10 @@
                             (aget 2)))]
       (remove empty? (js->clj sym-arr)))))
 
-(defn prompt [term filename]
-  (-> term
-      (.colorRgbHex.bold
-       (:color3 @colors/current-colorset)
-       (str "[" filename "] "))
-      (.colorRgbHex (:color2 @colors/current-colorset)
-                    "csnd> ")
-      (.styleReset)))
-
-(def logger-buffer (atom (generate-banner (.GetVersion csound))))
-
 (def logger-queue-size (atom 0))
 
 (def upper-has-logged? (atom false))
 
-(declare logger)
-
-
-#_(cond
-    (and @first-log?
-         (not pre-rebase?)
-         (< (.-y input-field-location) (.-height term)))
-    (and (not pre-rebase?)
-         (< (.-y input-field-location) (.-height term)))
-    (inc (.-y input-field-location))
-    (not pre-rebase?)
-    (inc (.-y input-field-location))
-    :else
-    (.-y input-field-location))
-
-;; (def dbg (atom {:queue [] :called 0}))
-;; (swap! dbg update :queue conj (.-y input-field-location))
-;; (swap! dbg update :called inc)
-
-(defn rebase [prompt-filename error? final?]
-  (let [input-stream         (:current-input-stream @state)
-        input-field-location (.getPosition input-stream)
-        not-at-bottom?       (< (.-y input-field-location) (.-height term))]
-    (js/setTimeout
-     #(if-not (number? (.-y input-field-location))
-        (rebase prompt-filename error?)
-        (do
-          (.rebase input-stream
-                   (.-x input-field-location)
-                   (if not-at-bottom?
-                     (inc (.-y input-field-location))                     
-                     (.-y input-field-location)))
-          (when-not (empty? @logger-buffer)
-            (logger prompt-filename
-                    (ffirst @logger-buffer)
-                    error?)
-            (swap! logger-buffer (comp vec rest)))
-          (when final?
-            (reset! logger-queue-size 0))))
-     10)))
-
-
-(defn logger [prompt-filename msg error?]
-  (reset! logger-queue-size (if (>= (count @logger-buffer)
-                                    @logger-queue-size)
-                              (count @logger-buffer)
-                              @logger-queue-size))
-  
-  (let [input-stream         (:current-input-stream @state)
-        cursor-offset        (.getCursorPosition input-stream)
-        input-field-location (.getPosition input-stream)
-        msg                  (-> msg string/trim
-                                 (string/replace "(token \"\n" "(token \"\\n"))
-        msg                  (if (re-find #"<<<" msg)
-                               (string/replace msg "\n" "??")
-                               msg)
-        msg                  (string/replace msg "\n" " ")
-        ;; msg                  (prn-str msg)
-        ]
-    (-> term
-        (as-> term (term "\n"))
-        (.previousLine 1)
-        (.eraseLine)
-        (.styleReset)
-        (.defaultColor msg))
-    (let [input-stream (:current-input-stream @state)]
-      (when (< 1 (count @logger-buffer))
-        (rebase prompt-filename error? false))
-      (when (>= 1 (count @logger-buffer))
-        (rebase prompt-filename error? true)
-        (js/setTimeout #(do (-> term
-                                (.column 0)
-                                (prompt prompt-filename))) 10)))))
 
 #_(defn logger [prompt-filename msg error?]
     (let [terminal-width (.-width term)
@@ -146,27 +58,17 @@
     (.Destroy csound Csound))
   (.processExit term exit-code))
 
-;; (empty? (string/trim msg)) nil
-;; (= " <<<\n" msg)
-;; (let [_       (swap! logger-buffer conj msg)
-;;       vek     (reverse @logger-buffer)
-;; out-str 
-;; out-str (str "  <<<" out-str ">>>")]
-;;   (reset! logger-buffer [])
-;;   (logger prompt-filename out-str error?))
-;; (or (not (empty? @logger-buffer))
-;;     (re-find #"line.*\n>>>" msg))
-;; (swap! logger-buffer conj msg)
-
-
 (defn fix-token-error-log [sek]
   (str "<<< "
        (-> (apply str (interpose " " sek))
-           (string/replace "\n" " ")
+           (string/replace "\n" "")
            string/trim
            (string/replace ">>> " "")
-           (string/replace " <<<" ""))
-       ">>>"))
+           (string/replace " <<<" "")
+           (string/replace " " "")
+           (string/replace ":" ": ")
+           (string/replace #"(line)([0-9])" "$1 $2"))
+       " >>>"))
 
 (defn repair-logs [queue-atom]
   (loop [[[msg error?] & msgs] @queue-atom
@@ -195,6 +97,11 @@
       (string? overall-samps)
       (recur msgs (conj out [(str overall-samps " " msg) error?])
              token-error end-of-score false)
+      (re-find #"rtevent:" msg)
+      (recur (rest msgs)
+             (conj out [(str (string/replace msg "\t" "") " "
+                             (string/trim (ffirst msgs))) error?])
+             token-error end-of-score overall-samps)
       :else
       (recur msgs (conj out [msg error?]) token-error end-of-score overall-samps))))
 
@@ -207,7 +114,8 @@
                                   (when (empty? @logger-buffer)
                                     (js/setTimeout
                                      #(do (reset! logger-buffer (repair-logs logger-buffer))
-                                          (logger filename
+                                          (logger state
+                                                  filename
                                                   (ffirst @logger-buffer)
                                                   (second (first @logger-buffer)))
                                           (swap! logger-buffer (comp vec rest)) ) 10))
@@ -217,7 +125,8 @@
     (.SetOption csound Csound "--output=dac")
     (case (path/extname filepath)
       ".orc" (.CompileOrc csound Csound file-contents)
-      (do (logger filename
+      (do (logger state
+                  filename
                   (str (path/basename filepath)
                        " is not a valid csound file.")
                   true)
@@ -227,14 +136,17 @@
     
     (if (= (.-SUCCESS csound) (.Start csound Csound))
       (.PerformAsync csound Csound #(.Destroy csound Csound))
-      (logger filename "Csound couldn't be started" true))
+      (logger state filename "Csound couldn't be started" true))
     (reset! csound-instance Csound)))
 
+(defn token-hook [token isEndOfInput previousTokens term config]
+  (cond
+    (contains? @opcode-symbols token)
+    (-> token (.colorRgbHex ))))
 
 (defn input-field []
   (.inputField term
-               #js {
-                    :autoComplete
+               #js {:autoComplete
                     (fn [input-string]
                       (cond
                         (> 2 (count input-string)) ""
@@ -248,31 +160,32 @@
                     :cancelable       true
                     :autoCompleteHint true
                     :autoCompleteMenu true
-                    :history          (clj->js @history)
+                    :history          (clj->js @history-atom)
+                    :tokenHook        token-hook
                     :keyBindings
-                    #js {"CTRL_C"    "cancel"
-                         "ESCAPE"    "cancel"
-                         "TAB"       "autoComplete"
-                         "ENTER"     "submit"
-                         "KP_ENTER"  "submit"
-                         "BACKSPACE" "backDelete"
-                         "DELETE"    "delete"
-                         "CTRL_U"    "deleteAllBefore"
-                         "CTRL_K"    "deleteAllAfter"
-                         "LEFT"      "backward"
-                         "RIGHT"     "forward"
-                         "DOWN"      "historyNext"
-                         "UP"        "historyPrevious"
-                         "HOME"      "first"
-                         "END"       "last"
+                    #js {"CTRL_C"     "cancel"
+                         "ESCAPE"     "cancel"
+                         "TAB"        "autoComplete"
+                         "ENTER"      "submit"
+                         "KP_ENTER"   "submit"
+                         "BACKSPACE"  "backDelete"
+                         "DELETE"     "delete"
+                         "CTRL_U"     "deleteAllBefore"
+                         "CTRL_K"     "deleteAllAfter"
+                         "LEFT"       "backward"
+                         "RIGHT"      "forward"
+                         "DOWN"       "historyNext"
+                         "UP"         "historyPrevious"
+                         "HOME"       "startOfInput"
+                         "END"        "endOfInput"
+                         "CTRL_A"     "startOfInput"
+                         "CTRL_E"     "endOfInput"
+                         "CTRL_LEFT"  "previousWord"
+                         "CTRL_RIGHT" "nextWord"
+                         "ALT_D"      "deleteNextWord"
+                         "CTRL_W"     "deletePreviousWord"
                          }
-                    }
-               #_(fn [error input]
-                   (js/console.log "\nYour input is: " input "error is: " error)
-                   ;;(.redraw this)
-                   
-                   ;; (re-prompt)
-                   #_(.exit js/process 0))))
+                    }))
 
 (defn set-global-keys []
   (.on term "key"
@@ -339,65 +252,59 @@
     (fs/watch file #js {:persistent false}
               (fn [event-type filename]
                 (when (= "change" event-type)
-                  (logger base-filename
+                  (logger state
+                          base-filename
                           (str "--> Changes detected in "
                                base-filename
                                " recompiling...")
                           false))))))
 
 (defn main [& _args]
-  (let [args        (.parseArgs argument-parser)
-        filename    (basename (.-file args))
-        abs-path    (path/normalize
-                     (path/resolve
-                      (.-file args)))
-        cfg-dir     (path/join (os/homedir) ".csnd")
-        history-loc (path/join cfg-dir "history.edn")]
-    (mkDir cfg-dir)
-    (when (fs/existsSync history-loc)
-      (reset! history
-              (try (into [] (edn/read-string
-                             (.toString (fs/readFileSync history-loc))))
-                   (catch js/Error e []))))
+  (let [args     (.parseArgs argument-parser)
+        filename (basename (.-file args))
+        abs-path (path/normalize
+                  (path/resolve
+                   (.-file args)))]
+    (swap! state assoc :filename filename)
+    (config/load-configuration! state)
+    (config/load-history! history-atom)
     (when-not (fs/existsSync (.-file args))
       (colors/error-color
        (str "File " abs-path " doesn't exist!"))
       (exit-gracefully 1))
     ;; (js/console.log args)
-    (.windowTitle term "Csound REPL")
+    (.windowTitle term "Csnd - Csound REPL")
     (set-global-keys)
-    (reset! opcode-symbols (get-opcode-symbols))
-    (prompt term filename)
+    (swap! opcode-symbols into (get-opcode-symbols))
+    (prompt term filename
+            (get-in @state [:colorset :color3])
+            (get-in @state [:colorset :color2]))
 
     (start-csound abs-path {})
     (file-watcher abs-path)
     (go-loop [input-stream (input-field)]
       (swap! state assoc :current-input-stream input-stream)
 
-      #_(when @first-log?
-          (js/console.log input-stream)
-          (.pause input-stream))
       (when-not (empty? @logger-buffer)
         (let [[msg error?] (first @logger-buffer)]
-          (logger filename msg error?)
+          (logger state filename msg error?)
           (swap! logger-buffer (comp vec rest))))
       (let [next-val (chan 1)]
-        ;; (set-global-keys term)
+
         (-> (.-promise input-stream)
             (.then (fn [input]
                      (when input
                        (when-not (empty? input)
-                         (let [new-history (vec (conj (take 49 @history) input))]
-                           (reset! history new-history)
-                           (fs/writeFileSync history-loc new-history))
+                         (config/update-history! input history-atom)
                          (when-let [Csound @csound-instance]
                            ;; (.ReadScore csound Csound input)
-                           (.CompileOrc csound Csound input)
-                           ))
+                           (.CompileOrc csound Csound input)))
                        (term "\n"))
                      (go (>! next-val (or input ""))))))
         (let [input (<! next-val)]
           ;; (<! (timeout 20))
-          (prompt term filename)
+          (prompt term filename
+                  (get-in @state [:colorset :color3])
+                  (get-in @state [:colorset :color2]))
           (recur (input-field)))))))
 

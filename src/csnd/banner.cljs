@@ -11,10 +11,14 @@
 (def csnd-version (.-version package-json))
 
 (defn generate-banner [csound-version]
-  (let [csound-version (str csound-version)]
-    [[(str "csnd-cli " csnd-version) false]
+  (let [csound-version (str csound-version)
+        pre-postfix    ["\t===================" false]]
+    [["\n" false]
      [(str "Csound "
            (subs csound-version 0 1) "."
            (subs csound-version 1 3) "."
            (subs csound-version 3 4))
-      false]]))
+      false]
+     [(str "Csnd " csnd-version) false]
+     ["Exit: Control+D" :tabbed]
+     ["\n" false]]))
