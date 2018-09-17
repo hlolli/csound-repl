@@ -9,7 +9,7 @@
 
 (def default-config-to-spit
   (prn-str {:autopair true
-            :colorset "jetoma"}))
+            :colorset "cyberpunk"}))
 
 (def cfg-dir     (path/join (os/homedir) ".csnd"))
 (def history-loc (path/join cfg-dir "history.edn"))
@@ -31,15 +31,16 @@
                                       {})))))
   (colors/colorset-from-config state-atom (:colorset @state-atom)))
 
-(defn load-history! [history-atom]
+(defn load-history! [state-atom]
   (mkDir cfg-dir)
   (when (fs/existsSync history-loc)
-    (reset! history-atom
-            (try (edn/read-string
-                  (.toString (fs/readFileSync history-loc)))
-                 (catch js/Error e [])))))
+    (swap! state-atom assoc :history
+           (try (edn/read-string
+                 (.toString (fs/readFileSync history-loc)))
+                (catch js/Error e [])))))
 
-(defn update-history! [new-item history-atom]
-  (let [new-history (conj (vec (take 49 @history-atom)) new-item)]
-    (reset! history-atom new-history)
+(defn update-history! [state-atom new-item]
+  (let [cur-history (:history @state-atom)
+        new-history (conj (vec (take 49 cur-history)) new-item)]
+    (swap! state-atom assoc :history new-history)
     (fs/writeFileSync history-loc new-history)))

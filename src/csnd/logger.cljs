@@ -33,7 +33,7 @@
        10))))
 
 
-(defn logger [state-atom prompt-filename msg error?]  
+(defn logger [state-atom prompt-filename msg error?]
   (let [input-stream         (:current-input-stream @state-atom)
         ;; cursor-offset        (if input-stream
         ;;                        (.getCursorPosition input-stream) 0)
@@ -41,10 +41,8 @@
         input-field-location (if input-stream (.getPosition input-stream) 0)
         msg                  (-> msg (string/replace "(token \"\n" "(token \"\\n"))
         msg                  (string/replace msg "\n" " ")
-        msg                  (if (re-matches #".*notrim.*" (str error?))
-                               msg
-                               (string/trim msg))
-        msg                  (if (= :tabbed error?) (str " " msg) msg)
+        msg                  (if (re-matches #".*notrim.*" (str error?)) msg (string/trim msg))
+        msg                  (if (re-find #"tab" (str error?)) (str " " msg) msg)
         ;; msg                  (prn-str msg)
         ]
     (-> term
@@ -54,8 +52,13 @@
         (.styleReset)
         (as-> term
             (cond
-              (re-matches #".*warn.*" (str error?))
+              (or (re-matches #".*warn.*" (str error?))
+                  (re-matches #"WARNING:.*" msg))
               (.colorRgbHex term (get-in @state-atom [:colorset :color5]))
+              (re-matches #".*banner.*" (str error?))
+              (.bold (.italic (.colorRgbHex term (get-in @state-atom [:colorset :color5]))))
+              (re-find #"filled1" (str error?))
+              (.bold (.inverse (.colorRgbHex term (get-in @state-atom [:colorset :color1]))))
               :else
               (.defaultColor term)))
         (as-> term (term msg))
@@ -70,3 +73,10 @@
                                 (prompt prompt-filename
                                         (get-in @state-atom [:colorset :color3])
                                         (get-in @state-atom [:colorset :color2])))) 10)))))
+
+(defn unsafe-log [state-atom msg & [error-flag]]
+  ((fn [msg]
+     (logger state-atom (:filename @state-atom)
+             msg
+             (or error-flag false)))
+   msg))

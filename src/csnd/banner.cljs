@@ -18,7 +18,7 @@
            (subs csound-version 0 1) "."
            (subs csound-version 1 3) "."
            (subs csound-version 3 4))
-      false]
-     [(str "Csnd " csnd-version) false]
-     ["Exit: Control+D" :tabbed]
+      :banner]
+     [(str "Csnd " csnd-version) :banner]
+     ["Exit: Control+D" :banner_tab]
      ["\n" false]]))
