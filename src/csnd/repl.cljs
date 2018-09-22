@@ -97,9 +97,7 @@
       (swap! state-atom assoc :current-input-stream input-stream)
 
       (when-not (empty? @logger/logger-buffer)
-        (let [[msg error?] (first @logger/logger-buffer)]
-          (logger/logger state-atom filename msg error?)
-          (swap! logger/logger-buffer (comp vec rest))))
+        (logger/flush-logger-buffer state-atom))
       (let [next-val (chan 1)]
 
         (-> (.-promise input-stream)

@@ -39,6 +39,7 @@
         ;;                        (.getCursorPosition input-stream) 0)
         ;; msg                  (prn-str msg)
         input-field-location (if input-stream (.getPosition input-stream) 0)
+        msg                  (str msg)
         msg                  (-> msg (string/replace "(token \"\n" "(token \"\\n"))
         msg                  (string/replace msg "\n" " ")
         msg                  (if (re-matches #".*notrim.*" (str error?)) msg (string/trim msg))
@@ -80,3 +81,69 @@
              msg
              (or error-flag false)))
    msg))
+
+(defn fix-token-error-log [sek]
+  (str "<<< "
+       (-> (apply str (interpose " " sek))
+           (string/replace "\n" "")
+           string/trim
+           (string/replace ">>> " "")
+           (string/replace " <<<" "")
+           (string/replace " " "")
+           (string/replace ":" ": ")
+           (string/replace #"(line)([0-9])" "$1 $2"))
+       " >>>"))
+
+(defn repair-logs [queue-atom]
+  (loop [[[msg error?] & msgs] @queue-atom
+         out                   []
+         token-error           []
+         end-of-score          false
+         overall-samps         false
+         plain-error           false]
+    (cond
+      (nil? msg) out
+      ;; No op, falseful information
+      (re-find #"Reading options from" msg) 
+      (recur msgs out token-error end-of-score overall-samps plain-error)
+      (re-find #"line.*\n>>>" msg)
+      (recur msgs out (conj token-error msg) end-of-score overall-samps plain-error)
+      (= " <<<\n" msg)
+      (recur
+       msgs
+       (conj out [(fix-token-error-log (conj token-error msg)) error?])
+       [] end-of-score overall-samps plain-error)
+      (not (empty? token-error))
+      (recur msgs out (conj token-error msg) end-of-score overall-samps plain-error)
+      (re-find #"end of score\." msg)
+      (recur msgs out token-error msg overall-samps plain-error)
+      (string? end-of-score)
+      (recur msgs (conj out [(str (string/replace end-of-score "\t" "") " " msg) error?])
+             token-error false overall-samps plain-error)
+      (re-find #"overall samples out of range" msg)
+      (recur msgs out token-error end-of-score msg plain-error)
+      (string? overall-samps)
+      (recur msgs (conj out [(str overall-samps " " msg) error?])
+             token-error end-of-score false plain-error)
+      (= "error:  " msg)
+      (recur msgs out token-error end-of-score overall-samps "error: ")
+      (string? plain-error)
+      (recur msgs (conj out [(str plain-error " " msg) error?])
+             token-error end-of-score overall-samps false)
+      (re-find #"rtevent:" msg)
+      (recur (rest msgs)
+             (conj out [(str (string/replace msg "\t" "") " "
+                             (string/trim (ffirst msgs))) error?])
+             token-error end-of-score overall-samps plain-error)
+      :else
+      (recur msgs (conj out [msg error?]) token-error end-of-score overall-samps plain-error))))
+
+(defn flush-logger-buffer [state-atom]
+  (let [filename (:filename @state-atom)]
+    (js/setTimeout
+     #(do (reset! logger-buffer (repair-logs logger-buffer))
+          (logger state-atom
+                  filename
+                  (ffirst @logger-buffer)
+                  (second (first @logger-buffer)))
+          (swap! logger-buffer (comp vec rest)) ) 10)))

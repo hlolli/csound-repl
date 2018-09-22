@@ -6,7 +6,9 @@
 (def package-json
   (js/JSON.parse
    (.toString
-    (fs/readFileSync (path/join (.cwd js/process) "package.json")))))
+    (fs/readFileSync
+     (path/resolve
+      (path/join js/__dirname "../package.json"))))))
 
 (def csnd-version (.-version package-json))
 

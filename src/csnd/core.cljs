@@ -3,13 +3,16 @@
             [csnd.repl :as repl]
             [csnd.term :refer [term prompt exit-gracefully]]
             [csnd.config :as config]
-            [csnd.logger :refer [logger logger-buffer unsafe-log]]
+            [csnd.logger :refer [logger logger-buffer unsafe-log 
+                                 flush-logger-buffer repair-logs]]
             [csnd.global-keybindings :as global-keybindings]
+            [csnd.utils :as utils]
             ["csound-api" :as csound]
             ["argparse" :as args]
             ["path" :refer [basename] :as path]
             ["fs" :as fs]
-            [clojure.string :as string]))
+            [clojure.string :as string] 
+            [clojure.spec.alpha :as s]))
 
 ;; csound.DisposeOpcodeList(Csound, opcodeList);
 
@@ -19,7 +22,8 @@
                   :history              []
                   :filename             ""
                   :filepath             ""
-                  :colorset             {}}))
+                  :colorset             {}
+                  :active-watchers      {}}))
 
 ;; (def csound-instance (atom nil))
 
@@ -53,82 +57,31 @@
             chopped-msg)))
 
 
-(defn fix-token-error-log [sek]
-  (str "<<< "
-       (-> (apply str (interpose " " sek))
-           (string/replace "\n" "")
-           string/trim
-           (string/replace ">>> " "")
-           (string/replace " <<<" "")
-           (string/replace " " "")
-           (string/replace ":" ": ")
-           (string/replace #"(line)([0-9])" "$1 $2"))
-       " >>>"))
-
-(defn repair-logs [queue-atom]
-  (loop [[[msg error?] & msgs] @queue-atom
-         out                   []
-         token-error           []
-         end-of-score          false
-         overall-samps         false
-         plain-error           false]
-    (cond
-      (nil? msg) out
-      (re-find #"line.*\n>>>" msg)
-      (recur msgs out (conj token-error msg) end-of-score overall-samps plain-error)
-      (= " <<<\n" msg)
-      (recur
-       msgs
-       (conj out [(fix-token-error-log (conj token-error msg)) error?])
-       [] end-of-score overall-samps plain-error)
-      (not (empty? token-error))
-      (recur msgs out (conj token-error msg) end-of-score overall-samps plain-error)
-      (re-find #"end of score\." msg)
-      (recur msgs out token-error msg overall-samps plain-error)
-      (string? end-of-score)
-      (recur msgs (conj out [(str (string/replace end-of-score "\t" "") " " msg) error?])
-             token-error false overall-samps plain-error)
-      (re-find #"overall samples out of range" msg)
-      (recur msgs out token-error end-of-score msg plain-error)
-      (string? overall-samps)
-      (recur msgs (conj out [(str overall-samps " " msg) error?])
-             token-error end-of-score false plain-error)
-      (= "error:  " msg)
-      (recur msgs out token-error end-of-score overall-samps "error: ")
-      (string? plain-error)
-      (recur msgs (conj out [(str plain-error " " msg) error?])
-             token-error end-of-score overall-samps false)
-      (re-find #"rtevent:" msg)
-      (recur (rest msgs)
-             (conj out [(str (string/replace msg "\t" "") " "
-                             (string/trim (ffirst msgs))) error?])
-             token-error end-of-score overall-samps plain-error)
-      :else
-      (recur msgs (conj out [msg error?]) token-error end-of-score overall-samps plain-error))))
-
-(defn start-csound [filepath config]
+(defn start-csound [state-atom]
   (let [Csound        (.Create csound "-m0")
-        filename      (path/basename filepath)
+        filename      (:filename @state-atom)
         _             (.SetDefaultMessageCallback
                        csound (fn [code msg]
                                 (when-not (empty? (string/trim msg))
                                   (when (empty? @logger-buffer)
-                                    (js/setTimeout
-                                     #(do (reset! logger-buffer (repair-logs logger-buffer))
-                                          (logger state
-                                                  filename
-                                                  (ffirst @logger-buffer)
-                                                  (second (first @logger-buffer)))
-                                          (swap! logger-buffer (comp vec rest)) ) 10))
+                                    (flush-logger-buffer state-atom))
                                   (swap! logger-buffer conj
                                          [msg (not= 0 code)]))))
-        file-contents (fs/readFileSync filepath)]
+        file-contents (fs/readFileSync (:filepath @state-atom))]
+    (when-not (empty? (:include-dirs @state-atom))
+      (run! #(.SetOption csound Csound (str "--env:INCDIR+=" %))
+            (:include-dirs @state-atom)))
+    (.SetOption csound Csound "-+ignore_csopts=1")
+    (.SetOption csound Csound "--postscriptdisplay")
     (.SetOption csound Csound "--output=dac")
-    (case (path/extname filepath)
-      ".orc" (.CompileOrc csound Csound file-contents)
+    (.SetOption csound Csound (str "--ksmps=" (:ksmps @state-atom)))
+    (.SetOption csound Csound (str "--0dbfs=" (:zerodbfs @state-atom)))
+    (.SetOption csound Csound (str "--nchnls=" (:nchnls @state-atom)))
+    (case (path/extname filename)
+      (".udo" ".orc") (.CompileOrc csound Csound file-contents)
       (do (logger state
                   filename
-                  (str (path/basename filepath)
+                  (str (path/basename (:filepath @state-atom))
                        " is not a valid csound file.")
                   true)
           (exit-gracefully state 1)))
@@ -156,21 +109,158 @@
                    :type "string"})
 
 (add-argument #js ["-k" "--ksmps"]
-              #js {:help "A global ksmps value"
-                   :type "int"})
+              #js {:help         "A global ksmps value"
+                   :type         "int"
+                   :defaultValue 64})
 
-(defn file-watcher [file]
-  (let [base-filename (path/basename file)]
-    (fs/watch file #js {:persistent false}
+(add-argument #js ["-A" "--zerodbfs"]
+              #js {:help         "The full-scale of zero decibel"
+                   :type         "int"
+                   :defaultValue 1})
+
+(add-argument #js ["-c" "--nchnls"]
+              #js {:help         "Number of output channels"
+                   :type         "int"
+                   :defaultValue 2})
+
+(add-argument #js ["-x" "--on-change"]
+              #js {:help "Orchestra code to compile when file changes"
+                   :type "string"})
+
+(add-argument #js ["-I" "--incdir"]
+              #js {:help (str "Directories that will be recursively compiled.\n"
+                              "When given as cli argument, it must be a JSON string,\n"
+                              "ex. --incdir \"[\\\"/path/to/dir\\\"]\"" )
+                   :type "string"})
+
+" function traverseDir(dir) {
+   fs.readdirSync(dir).forEach(file => {
+     let fullPath = path.join(dir, file);
+     if (fs.lstatSync(fullPath).isDirectory()) {
+        console.log(fullPath);
+        traverseDir(fullPath);
+      } else {
+        console.log(fullPath);
+      }  
+   });
+ }"
+
+(defn remove-temp-files [filevec]
+  (vec (remove #(or (.endsWith % "~") (.includes % "#")) filevec)))
+
+(defn- strip-and-determine-included-files
+  "returns vectore with uncommented included 
+   filenames and a string where the includes 
+   have been trimmed out.
+   This is needed due to reload bug with 
+   #include. The include statements are already
+   called once at this poins, subsequential
+   include calls must be trimmed out."
+  [filepath]
+  (let [file-contents (.toString (fs/readFileSync filepath))]
+    (loop [[line & lines]  (string/split file-contents "\n")
+           inside-comment? false
+           filenames       []
+           chunks          []]
+      (if (nil? line)
+        [filenames (string/join "\n" chunks)]
+        (let [comment-ends?   (if inside-comment? (some? (re-find #"\*/" line)) nil)
+              line-trim       (if (and inside-comment? comment-ends?)
+                                (let [comment-end-index (.indexOf line "*/")
+                                      subs-index        (if (< comment-end-index 0)
+                                                          0 (+ 2 comment-end-index))]
+                                  (subs line subs-index))
+                                line)
+              include?        (if inside-comment? 
+                                false
+                                (some? (re-matches #"[ \t]*[^;|^/\*]*#include.*\".*\"" line-trim)))
+              inside-comment? (if (and inside-comment? (not comment-ends?))
+                                false true)]
+          (recur lines
+                 inside-comment?
+                 (if-not include? 
+                   filenames 
+                   (conj filenames (second (re-find #"#include.*\"(.*)\"" line))))
+                 (if include? 
+                   (conj chunks (string/replace line #"#include.*\".*\"" ""))
+                   (conj chunks line))))))))
+
+(defn file-watcher [state-atom file main?]
+  (let [base-filename (path/basename file)
+        throttle      (volatile! false)]
+    (fs/watch file #js {:persistent true}
               (fn [event-type filename]
-                (when (= "change" event-type)
-                  (logger state
-                          base-filename
-                          (str "--> Changes detected in "
-                               base-filename
-                               " recompiling...")
-                          false))))))
+                (let [[_ file-contents] (strip-and-determine-included-files file)
+                      Csound            (:csound-instance @state-atom)]
+                  (when (and (= "change" event-type) )
+                    (vreset! throttle true)
+                    (js/setTimeout #(vreset! throttle false) 50)
+                    (when (empty? @logger-buffer)
+                      (flush-logger-buffer state-atom))
+                    (swap! logger-buffer conj
+                           [(str "--> Changes detected "
+                                 (if main? "in " " from an included file ")
+                                 base-filename
+                                 " recompiling...") false])
+                    (prn (str "\n" file-contents "\n"))
+                    (case (path/extname file)
+                      (".udo" ".orc") (.CompileOrc csound Csound file-contents))
+                    (when-let [on-change-code (:on-change @state-atom)]
+                      (.CompileOrc csound Csound on-change-code))))))))
 
+(defn folder-watcher [state-atom folder]
+  (let [base-filename (path/basename folder)
+        dir-items     (-> (js->clj (fs/readdirSync folder))
+                          remove-temp-files)]
+    (->> dir-items
+         (run! (fn [filename]
+                 (let [filepath (path/join folder filename)]
+                   (if (.isDirectory (fs/lstatSync filepath))
+                     (folder-watcher state-atom filepath)
+                     (when (and (#{".udo" ".orc" ".csd"} (path/extname filepath))
+                                (not 
+                                 (contains?
+                                  (into #{} (keys (:active-watchers @state-atom))) filepath)))
+                       (swap! logger-buffer conj
+                              [(str "--> Watching included file "
+                                    filepath
+                                    " for changes") false])
+                       (->>
+                        (file-watcher state-atom filepath false)
+                        (swap! state-atom assoc-in [:active-watchers filepath]))))))))))
+
+
+(defn every-element-string? [array] (every? string? array))
+(defn every-path-is-folder? [array] (-> #(.isDirectory (fs/lstatSync %))
+                                        (every? array)))
+
+(s/def ::incdir (s/and vector?
+                       every-element-string?
+                       every-path-is-folder?))
+
+(defn resolve-include-dirs [state-atom args]
+  (let [incdir-cli-raw       (.-incdir args)
+        incdir-cli           (if-not (empty? incdir-cli-raw)
+                               (try (js->clj (js/JSON.parse incdir-cli-raw))
+                                    (catch js/Error e 
+                                      (do (js/console.error 
+                                           "Unparseable argument to incdir"
+                                           (prn-str incdir-cli-raw)
+                                           "Should be a valid JSON string.")
+                                          (exit-gracefully state-atom 1))))
+                               [])
+        incdir-cli           (mapv (comp path/resolve utils/expand-homedir) incdir-cli)
+        incdir-cli-valid?    (utils/assert-and-explain state-atom ::incdir
+                                                       incdir-cli true)
+        config-incdir        (or (:include-dirs @state-atom) [])
+        config-incdir        (mapv (comp path/resolve utils/expand-homedir) config-incdir)
+        config-incdir-valid? (utils/assert-and-explain state-atom ::incdir
+                                                       config-incdir true)
+        out-vec              (-> (into incdir-cli config-incdir)
+                                 dedupe vec)]
+    (swap! state-atom assoc :include-dirs out-vec)
+    (if (or (not incdir-cli-valid?) (not config-incdir-valid?))
+      false true)))
 
 (defn main [& _args]
   (let [args     (.parseArgs argument-parser)
@@ -178,7 +268,14 @@
         abs-path (path/normalize
                   (path/resolve
                    (.-file args)))]
-    (swap! state assoc :filename filename :filepath abs-path)
+    (swap! state assoc 
+           :filename filename 
+           :filepath abs-path
+           :ksmps (.-ksmps args)
+           :nchnls (.-nchnls args)
+           :zerodbfs (.-zerodbfs args)
+           :on-change (if (empty? (.-on-change args))
+                        nil (.-on-change args)))
     (config/load-configuration! state)
     (config/load-history! state)
     (when-not (fs/existsSync (.-file args))
@@ -189,11 +286,12 @@
     (.windowTitle term "Csnd - Csound REPL")
     (global-keybindings/set-global-keys filename state)
     (swap! state update :opcode-symbols into (get-opcode-symbols))
-    (start-csound abs-path {})
-    (file-watcher abs-path)
-    (repl/start-repl state)
-    (prompt term filename
-            (get-in @state [:colorset :color3])
-            (get-in @state [:colorset :color2]))
-    ))
+    (file-watcher state abs-path true)
+    (when (resolve-include-dirs state args)
+      (start-csound state)
+      (run! #(folder-watcher state %) (:include-dirs @state))
+      (repl/start-repl state)
+      (prompt term filename
+              (get-in @state [:colorset :color3])
+              (get-in @state [:colorset :color2])))))
 

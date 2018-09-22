@@ -1,5 +1,6 @@
 (ns csnd.config
   (:require [csnd.colors :as colors]
+            [clojure.spec.alpha :as s]
             ["os" :as os]
             ["path" :as path]
             ["fs" :as fs]
@@ -11,7 +12,7 @@
   (prn-str {:autopair true
             :colorset "cyberpunk"}))
 
-(def cfg-dir     (path/join (os/homedir) ".csnd"))
+(def cfg-dir     (path/join (os/homedir) ".csound-repl"))
 (def history-loc (path/join cfg-dir "history.edn"))
 (def config-loc (path/join cfg-dir "config.edn"))
 
@@ -21,8 +22,9 @@
     (fs/writeFileSync config-loc default-config-to-spit))
   (when (fs/existsSync config-loc)
     (swap! state-atom merge
-           (try (edn/read-string
-                 (.toString (fs/readFileSync config-loc)))
+           (try (reverse
+                 (edn/read-string
+                  (.toString (fs/readFileSync config-loc))))
                 (catch js/Error e (do (.error
                                        js/console
                                        (str "WARNING broken or invalid edn file: "

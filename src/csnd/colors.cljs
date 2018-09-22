@@ -3,8 +3,7 @@
             [csnd.logger :refer [logger-buffer]]
             [clojure.spec.alpha :as s]
             [clojure.string :as string]
-            [fipp.edn :refer (pprint) :rename {pprint fipp}]
-            ["../js/invertColor" :as invert-color]))
+            [fipp.edn :refer (pprint) :rename {pprint fipp}]))
 
 ;; (def current-colorset (atom {}))
 

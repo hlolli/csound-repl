@@ -8,8 +8,11 @@
  ["src"]
 
  :builds
- {:main {:target     :node-script
-         :output-dir "lib"
-         :output-to  "lib/index.js"
+ {:main {:target           :node-script
+         :output-dir       "lib"
+         :output-to        "lib/index.js"
+         :compiler-options {:optimizations :simple
+                            :source-map    true
+                            :language-out  :es5}
          ;; :modules
-         :main       csnd.core/main}}}
+         :main             csnd.core/main}}}

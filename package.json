@@ -1,16 +1,18 @@
 {
-  "name": "csnd",
+  "name": "csound-repl",
   "version": "1.0.0-alpha",
   "description": "Csound repl",
   "main": "lib/index.js",
+  "bin": "./lib/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "preinstall": "node src/js/nixos_preinstall.js",
-    "dev": "npx shadow-cljs watch main"
+    "dev": "npx shadow-cljs watch main",
+    "release": "npx shadow-cljs release main"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hlolli/csnd.git"
+    "url": "git+https://github.com/hlolli/csound-repl.git"
   },
   "keywords": [
     "csound",
@@ -21,9 +23,9 @@
   "author": "Hlöðver Sigurðsson",
   "license": "GPL-3.0",
   "bugs": {
-    "url": "https://github.com/hlolli/csnd/issues"
+    "url": "https://github.com/hlolli/csound-repl/issues"
   },
-  "homepage": "https://github.com/hlolli/csnd#readme",
+  "homepage": "https://github.com/hlolli/csound-repl",
   "dependencies": {
     "argparse": "^1.0.10",
     "csound-api": "^0.10.7",

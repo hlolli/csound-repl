@@ -1,36 +1,16 @@
 (ns csnd.utils
-  (:require [csnd.term :refer [term prompt]]
+  (:require [csnd.term :refer [term prompt exit-gracefully]]
             [csnd.logger :as logger]
             [csnd.repl :as repl]
+            [clojure.spec.alpha :as s]
+            [clojure.string :as string]
+            [fipp.edn :refer (pprint) :rename {pprint fipp}]
             ["path" :as path]
             ["os" :as os]))
 
 (defn expand-homedir [path-str]
   (-> (.replace path-str "~" (os/homedir))
       (path/resolve)))
-
-;; var term = require( 'terminal-kit' ).terminal ;
-
-;; var items = [ 'File' , 'Edit' , 'View' , 'History' , 'Bookmarks' , 'Tools' , 'Help' ] ;
-
-;; var options = {
-;; 	y: 1 ,	// the menu will be on the top of the terminal
-;; 	style: term.inverse ,
-;; 	selectedStyle: term.dim.blue.bgGreen
-;; } ;
-
-;; term.clear() ;
-
-;; term.singleLineMenu( items , options , function( error , response ) {
-;; 	term( '\n' ).eraseLineAfter.green(
-;; 		"#%s selected: %s (%s,%s)\n" ,
-;; 		response.selectedIndex ,
-;; 		response.selectedText ,
-;; 		response.x ,
-;; 		response.y
-;; 	) ;
-;; 	process.exit() ;
-;; } ) ;
 
 (defn exit-prompt [state-atom term cb]
   (let [opt #js {:yes ["y", "ENTER"] :no ["n"]}
@@ -47,3 +27,19 @@
     (when-let [input-stream (:current-input-stream @state-atom)]
       (.abort input-stream))
     (.yesOrNo term opt cb')))
+
+(defn assert-and-explain
+  "returns true/false"
+  [state-atom spec data exit-on-fail?]
+  (if-not (s/valid? spec data)
+    (let [explain-chunks
+          (-> (with-out-str (pprint (s/explain-data spec data)))
+              (string/split #"\n"))]
+      (doall (for [chnk explain-chunks]
+               (swap! logger/logger-buffer conj [chnk :warn_notrim])))
+      (when exit-on-fail?
+        (logger/flush-logger-buffer state-atom)
+        (js/setTimeout #(exit-gracefully state-atom 1)
+                       (* 5 (count @logger/logger-buffer))))
+      false)
+    true))
