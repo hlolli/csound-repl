@@ -14,6 +14,18 @@
       (.colorRgbHex promptcolor "csnd> ")
       (.styleReset)))
 
+(defn multiline-prompt [term filename filecolor promptcolor indent-level]
+  (-> term
+      (.column 0)
+      (.colorRgbHex.bold
+       filecolor
+       (str " " (apply str (take (count filename) (cycle [" "])))
+            "      "))
+      (.colorRgbHex promptcolor ">")
+      (.styleReset)
+      (as-> term (term (str " " (apply str (take indent-level (cycle [" "]))))))))
+
+
 (defn exit-gracefully [state exit-code]
   (when-let [Csound (:csound-instance @state)]
     (.Stop csound Csound)

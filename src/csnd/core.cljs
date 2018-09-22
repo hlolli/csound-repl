@@ -68,17 +68,18 @@
                                   (swap! logger-buffer conj
                                          [msg (not= 0 code)]))))
         file-contents (fs/readFileSync (:filepath @state-atom))]
-    (when-not (empty? (:include-dirs @state-atom))
-      (run! #(.SetOption csound Csound (str "--env:INCDIR+=" %))
-            (:include-dirs @state-atom)))
-    (.SetOption csound Csound "-+ignore_csopts=1")
-    (.SetOption csound Csound "--postscriptdisplay")
+    ;; MAJOR BUG, report asap
+    #_(when-not (empty? (:include-dirs @state-atom))
+        (run! #(.SetOption csound Csound (str "--env:INCDIR+=" %))
+              (:include-dirs @state-atom)))
+    ;; (.SetOption csound Csound "-+ignore_csopts=1")
+    ;; (.SetOption csound Csound "--postscriptdisplay")
     (.SetOption csound Csound "--output=dac")
     (.SetOption csound Csound (str "--ksmps=" (:ksmps @state-atom)))
     (.SetOption csound Csound (str "--0dbfs=" (:zerodbfs @state-atom)))
     (.SetOption csound Csound (str "--nchnls=" (:nchnls @state-atom)))
     (case (path/extname filename)
-      (".udo" ".orc") (.CompileOrc csound Csound file-contents)
+      (".udo" ".orc") (js/setTimeout #(.CompileOrc csound Csound file-contents) 10)
       (do (logger state
                   filename
                   (str (path/basename (:filepath @state-atom))
@@ -87,11 +88,11 @@
           (exit-gracefully state 1)))
     ;; (js/setTimeout #(.Message csound Csound "hello 100000000001 100000000000000001 999") 1000)
     ;; (js/setTimeout #(.Message csound Csound "hello 2") 2000)
-    
+
+    (swap! state assoc :csound-instance Csound)
     (if (= (.-SUCCESS csound) (.Start csound Csound))
       (.PerformAsync csound Csound #(.Destroy csound Csound))
-      (logger state filename "Csound couldn't be started" true))
-    (swap! state assoc :csound-instance Csound)))
+      (logger state filename "Csound couldn't be started" true))))
 
 
 (def argument-parser
@@ -133,80 +134,78 @@
                               "ex. --incdir \"[\\\"/path/to/dir\\\"]\"" )
                    :type "string"})
 
-" function traverseDir(dir) {
-   fs.readdirSync(dir).forEach(file => {
-     let fullPath = path.join(dir, file);
-     if (fs.lstatSync(fullPath).isDirectory()) {
-        console.log(fullPath);
-        traverseDir(fullPath);
-      } else {
-        console.log(fullPath);
-      }  
-   });
- }"
-
 (defn remove-temp-files [filevec]
   (vec (remove #(or (.endsWith % "~") (.includes % "#")) filevec)))
 
-(defn- strip-and-determine-included-files
-  "returns vectore with uncommented included 
+#_(defn- strip-and-determine-included-files
+    "returns vectore with uncommented included 
    filenames and a string where the includes 
    have been trimmed out.
    This is needed due to reload bug with 
    #include. The include statements are already
    called once at this poins, subsequential
    include calls must be trimmed out."
-  [filepath]
-  (let [file-contents (.toString (fs/readFileSync filepath))]
-    (loop [[line & lines]  (string/split file-contents "\n")
-           inside-comment? false
-           filenames       []
-           chunks          []]
-      (if (nil? line)
-        [filenames (string/join "\n" chunks)]
-        (let [comment-ends?   (if inside-comment? (some? (re-find #"\*/" line)) nil)
-              line-trim       (if (and inside-comment? comment-ends?)
-                                (let [comment-end-index (.indexOf line "*/")
-                                      subs-index        (if (< comment-end-index 0)
-                                                          0 (+ 2 comment-end-index))]
-                                  (subs line subs-index))
-                                line)
-              include?        (if inside-comment? 
-                                false
-                                (some? (re-matches #"[ \t]*[^;|^/\*]*#include.*\".*\"" line-trim)))
-              inside-comment? (if (and inside-comment? (not comment-ends?))
-                                false true)]
-          (recur lines
-                 inside-comment?
-                 (if-not include? 
-                   filenames 
-                   (conj filenames (second (re-find #"#include.*\"(.*)\"" line))))
-                 (if include? 
-                   (conj chunks (string/replace line #"#include.*\".*\"" ""))
-                   (conj chunks line))))))))
+    [filepath]
+    (let [file-contents (try (.toString (fs/readFileSync filepath))
+                             (catch js/Error e nil))]
+      (when file-contents
+        (loop [[line & lines]  (string/split file-contents "\n")
+               inside-comment? false
+               filenames       []
+               chunks          []]
+          (if (nil? line)
+            [filenames (string/join "\n" chunks)]
+            (let [comment-ends?   (if inside-comment? (some? (re-find #"\*/" line)) nil)
+                  line-trim       (if (and inside-comment? comment-ends?)
+                                    (let [comment-end-index (.indexOf line "*/")
+                                          subs-index        (if (< comment-end-index 0)
+                                                              0 (+ 2 comment-end-index))]
+                                      (subs line subs-index))
+                                    line)
+                  include?        (if inside-comment? 
+                                    false
+                                    (some? (re-matches #"[ \t]*[^;|^/\*]*#include.*\".*\"" line-trim)))
+                  inside-comment? (if (and inside-comment? (not comment-ends?))
+                                    false true)]
+              (recur lines
+                     inside-comment?
+                     (if-not include? 
+                       filenames 
+                       (conj filenames (second (re-find #"#include.*\"(.*)\"" line))))
+                     (if include? 
+                       (conj chunks (string/replace line #"#include.*\".*\"" ""))
+                       (conj chunks line)))))))))
 
 (defn file-watcher [state-atom file main?]
   (let [base-filename (path/basename file)
         throttle      (volatile! false)]
     (fs/watch file #js {:persistent true}
               (fn [event-type filename]
-                (let [[_ file-contents] (strip-and-determine-included-files file)
-                      Csound            (:csound-instance @state-atom)]
-                  (when (and (= "change" event-type) )
+                (let [file-contents (try (.toString (fs/readFileSync file))
+                                         (catch js/Error e nil))
+                      ;;[_ file-contents] (strip-and-determine-included-files file)
+                      Csound        (:csound-instance @state-atom)]
+                  (when (and (= "change" event-type) (not @throttle)
+                             (not (empty? file-contents)))
                     (vreset! throttle true)
                     (js/setTimeout #(vreset! throttle false) 50)
-                    (when (empty? @logger-buffer)
+                    (when (and main? (empty? @logger-buffer))
                       (flush-logger-buffer state-atom))
                     (swap! logger-buffer conj
                            [(str "--> Changes detected "
-                                 (if main? "in " " from an included file ")
+                                 (if main? "in " "from an included file ")
                                  base-filename
                                  " recompiling...") false])
-                    (prn (str "\n" file-contents "\n"))
-                    (case (path/extname file)
-                      (".udo" ".orc") (.CompileOrc csound Csound file-contents))
-                    (when-let [on-change-code (:on-change @state-atom)]
-                      (.CompileOrc csound Csound on-change-code))))))))
+                    (fs/readFile file
+                                 (fn [err contents]
+                                   (if err
+                                     (js/console.error
+                                      (str "Error reading file: " err))
+                                     ;; (js/console.log Csound)
+                                     (.CompileOrc csound Csound (.toString contents))
+                                     #_(.CompileOrc csound Csound contents))))
+                    #_(when-let [on-change-code (:on-change @state-atom)]
+                        (.CompileOrc csound Csound on-change-code))))))))
 
 (defn folder-watcher [state-atom folder]
   (let [base-filename (path/basename folder)
@@ -221,13 +220,22 @@
                                 (not 
                                  (contains?
                                   (into #{} (keys (:active-watchers @state-atom))) filepath)))
+                       (fs/readFile
+                        filepath
+                        (fn [err contents]
+                          (if err
+                            (js/console.error "Error loading" filename "\n" err "\n")
+                            (.CompileOrc csound (:csound-instance @state-atom)
+                                         (.toString contents)))))
                        (swap! logger-buffer conj
                               [(str "--> Watching included file "
                                     filepath
                                     " for changes") false])
-                       (->>
-                        (file-watcher state-atom filepath false)
-                        (swap! state-atom assoc-in [:active-watchers filepath]))))))))))
+                       (file-watcher state-atom filepath false)
+                       
+                       #_(->>
+                          (file-watcher state-atom filepath false)
+                          (swap! state-atom assoc-in [:active-watchers filepath]))))))))))
 
 
 (defn every-element-string? [array] (every? string? array))
@@ -286,10 +294,10 @@
     (.windowTitle term "Csnd - Csound REPL")
     (global-keybindings/set-global-keys filename state)
     (swap! state update :opcode-symbols into (get-opcode-symbols))
-    (file-watcher state abs-path true)
     (when (resolve-include-dirs state args)
       (start-csound state)
       (run! #(folder-watcher state %) (:include-dirs @state))
+      (file-watcher state abs-path true)
       (repl/start-repl state)
       (prompt term filename
               (get-in @state [:colorset :color3])

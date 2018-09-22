@@ -84,12 +84,13 @@
 
 (defn fix-token-error-log [sek]
   (str "<<< "
-       (-> (apply str (interpose " " sek))
-           (string/replace "\n" "")
-           string/trim
-           (string/replace ">>> " "")
-           (string/replace " <<<" "")
+       (-> (string/join "" sek)
            (string/replace " " "")
+           (string/replace "\n" " ")
+           (string/replace "\t" " ")
+           string/trim
+           (string/replace ">" "")
+           (string/replace "<" "")
            (string/replace ":" ": ")
            (string/replace #"(line)([0-9])" "$1 $2"))
        " >>>"))
